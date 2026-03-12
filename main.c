@@ -181,9 +181,9 @@ ISR(TIMER0_OVF_vect)
 
 static void display_init(void)
 {
-    /* PORTB: PB0 výstup (seg A), PB1/PB2 výstup (PWM, zatím HIGH), ostatní pull-up */
+    /* PORTB: PB0 výstup (seg A), PB1/PB2 výstup (active HIGH, start LOW), ostatní pull-up */
     DDRB  = SEG_B_MASK | (1 << PWM1_PIN) | (1 << PWM2_PIN);
-    PORTB = 0xFF;
+    PORTB = 0xFF & ~(1 << PWM1_PIN) & ~(1 << PWM2_PIN);  /* PB1,PB2 start LOW */
 
     /* PORTC: PC0-PC4 výstup (segmenty), PC5 vstup s pull-up (1-Wire idle) */
     DDRC  = SEG_C_MASK;
@@ -408,9 +408,9 @@ static const uint8_t pwm_table[] = {
 
 static void pwm_init(void)
 {
-    /* Timer1: Fast PWM 8-bit, non-inverting na OC1A (PB1) */
+    /* Timer1: Fast PWM 8-bit, inverting na OC1A (PB1) → HIGH = aktivní */
     /* 16 MHz / 1 / 256 = 62.5 kHz */
-    TCCR1A = (1 << COM1A1) | (1 << WGM10);
+    TCCR1A = (1 << COM1A1) | (1 << COM1A0) | (1 << WGM10);
     TCCR1B = (1 << WGM12) | (1 << CS10);
     OCR1A  = pwm_table[5];  /* 50% výchozí */
 }
@@ -449,9 +449,9 @@ static void heater_set(uint8_t on)
 {
     heater_active = on;
     if (on)
-        PORTB &= ~(1 << PWM2_PIN);  /* LOW = aktivní */
+        PORTB |= (1 << PWM2_PIN);   /* HIGH = aktivní */
     else
-        PORTB |= (1 << PWM2_PIN);   /* HIGH = neaktivní */
+        PORTB &= ~(1 << PWM2_PIN);  /* LOW = neaktivní */
 }
 
 /* Vyhodnotit stav spirály na základě teploty a setpointu */

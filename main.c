@@ -53,9 +53,13 @@
 #define OW_PIN      PINC
 #define OW_BIT      PC5
 
-/* PWM výstupy (rezervováno) */
-#define PWM1_PIN    PB1   /* OC1A */
-#define PWM2_PIN    PB2   /* OC1B */
+/* PWM výstupy */
+#define PWM1_PIN    PB1   /* OC1A - ventilátor */
+#define PWM2_PIN    PB2   /* topná spirála (SW ON/OFF) */
+
+/* Topná spirála: konstanty */
+#define HEATER_PERIOD  4880   /* 10 s perioda (488 Hz × 10) */
+#define HEATER_HYST    50     /* hystereze 5.0°C (v 1/10 °C) */
 
 /* Pin pro každou pozici: DIG1(stovky)=PD2, DIG2(desítky)=PD1, DIG3(jednotky)=PD0 */
 static const uint8_t dig_pin[] = {PD2, PD1, PD0};
@@ -349,6 +353,9 @@ int16_t ds18b20_read_temp(void)
 }
 
 /* Zobrazit teplotu na displeji: XX.X (s tečkou za druhým digitem) */
+/* Pokud heater_active = 1, rozsvítí DP3 */
+static uint8_t heater_active = 0;
+
 static void display_temp(int16_t temp_x10)
 {
     if (temp_x10 < 0 || temp_x10 > 999)
@@ -361,7 +368,10 @@ static void display_temp(int16_t temp_x10)
     disp_b[0] = seg_b[d0]; disp_c[0] = seg_c[d0]; disp_d[0] = seg_d[d0];
     /* DIG2 s desetinnou tečkou */
     disp_b[1] = seg_b[d1]; disp_c[1] = seg_c[d1] | (1 << PC2); disp_d[1] = seg_d[d1];
+    /* DIG3: DP3 svítí když topí spirála */
     disp_b[2] = seg_b[d2]; disp_c[2] = seg_c[d2]; disp_d[2] = seg_d[d2];
+    if (heater_active)
+        disp_c[2] |= (1 << PC2);
 }
 
 /* Zobrazit žádanou hodnotu: XX.X s DP1 (první tečka) jako indikace editačního režimu */
@@ -432,6 +442,27 @@ static void display_fan(uint8_t fan_pct)
     }
 }
 
+/* ====== Topná spirála (ON/OFF s hysterezí, PB2) ====== */
+
+static void heater_set(uint8_t on)
+{
+    heater_active = on;
+    if (on)
+        PORTB &= ~(1 << PWM2_PIN);  /* LOW = aktivní */
+    else
+        PORTB |= (1 << PWM2_PIN);   /* HIGH = neaktivní */
+}
+
+/* Vyhodnotit stav spirály na základě teploty a setpointu */
+static void heater_update(int16_t temp_x10, int16_t setpoint_x10)
+{
+    if (temp_x10 <= setpoint_x10 - HEATER_HYST)
+        heater_set(1);
+    else if (temp_x10 >= setpoint_x10)
+        heater_set(0);
+    /* v pásmu hystereze: ponechat současný stav */
+}
+
 /* ====== Hlavní program ====== */
 
 #define MODE_TEMP      0
@@ -467,6 +498,7 @@ int main(void)
         {
             int16_t temp = ds18b20_read_temp();
             ds18b20_start();
+            heater_update(temp, setpoint);
             display_temp(temp);
 
             /* Rotace enkodéru → přepni na fan */

@@ -389,58 +389,160 @@ static void wait_button_release(void)
     _delay_ms(50);  /* krátký debounce po uvolnění */
 }
 
+/* ====== PWM ventilátor (Timer1, OC1A = PB1) ====== */
+
+static const uint8_t pwm_table[] = {
+    0, 25, 51, 76, 102, 128, 153, 179, 204, 230, 255
+};
+
+static void pwm_init(void)
+{
+    /* Timer1: Fast PWM 8-bit, non-inverting na OC1A (PB1) */
+    /* 16 MHz / 1 / 256 = 62.5 kHz */
+    TCCR1A = (1 << COM1A1) | (1 << WGM10);
+    TCCR1B = (1 << WGM12) | (1 << CS10);
+    OCR1A  = pwm_table[5];  /* 50% výchozí */
+}
+
+static void pwm_set(uint8_t step)
+{
+    if (step > 10) step = 10;
+    OCR1A = pwm_table[step];
+}
+
+/* Zobrazit fan speed: "FXX" (0-90%) nebo "100" */
+#define CHAR_F_B  0x01        /* A=PB0 */
+#define CHAR_F_C  0x12        /* G=PC1, E=PC4 */
+#define CHAR_F_D  0x80        /* F=PD7 */
+
+static void display_fan(uint8_t fan_pct)
+{
+    if (fan_pct >= 100) {
+        /* "100" */
+        disp_b[0] = seg_b[1]; disp_c[0] = seg_c[1]; disp_d[0] = seg_d[1];
+        disp_b[1] = seg_b[0]; disp_c[1] = seg_c[0]; disp_d[1] = seg_d[0];
+        disp_b[2] = seg_b[0]; disp_c[2] = seg_c[0]; disp_d[2] = seg_d[0];
+    } else {
+        /* "FXX" */
+        disp_b[0] = CHAR_F_B; disp_c[0] = CHAR_F_C; disp_d[0] = CHAR_F_D;
+        uint8_t tens  = fan_pct / 10;
+        uint8_t units = fan_pct % 10;
+        disp_b[1] = seg_b[tens];  disp_c[1] = seg_c[tens];  disp_d[1] = seg_d[tens];
+        disp_b[2] = seg_b[units]; disp_c[2] = seg_c[units]; disp_d[2] = seg_d[units];
+    }
+}
+
+/* ====== Hlavní program ====== */
+
+#define MODE_TEMP      0
+#define MODE_FAN       1
+#define MODE_SETPOINT  2
+
 int main(void)
 {
     display_init();
+    pwm_init();
     sei();
 
-    int16_t setpoint = 320;  /* žádaná hodnota: 32.0°C (v 1/10 °C) */
-    int16_t temp = 0;
-    uint8_t editing = 0;
+    int16_t setpoint = 320;   /* žádaná hodnota: 32.0°C */
+    int8_t  fan_step = 5;     /* 50% */
+    uint8_t mode = MODE_TEMP;
+    uint8_t fan_timeout = 0;  /* odpočet 2 s (40 × 50 ms) */
+    int16_t last_enc;
 
     ds18b20_start();
     _delay_ms(750);
+    last_enc = encoder_get();
 
     while (1) {
-        if (!editing) {
-            /* --- Normální režim: zobraz teplotu --- */
-            temp = ds18b20_read_temp();
+        /* Přečíst delta enkodéru */
+        int16_t enc_now = encoder_get();
+        int16_t delta   = enc_now - last_enc;
+        last_enc = enc_now;
+
+        switch (mode) {
+
+        /* --- Teplota (normální režim) --- */
+        case MODE_TEMP:
+        {
+            int16_t temp = ds18b20_read_temp();
             ds18b20_start();
             display_temp(temp);
 
-            /* Stisk tlačítka → přepni do editace */
+            /* Rotace enkodéru → přepni na fan */
+            if (delta) {
+                fan_step += delta;
+                if (fan_step < 0)  fan_step = 0;
+                if (fan_step > 10) fan_step = 10;
+                pwm_set(fan_step);
+                display_fan(fan_step * 10);
+                fan_timeout = 40;  /* 2 s */
+                mode = MODE_FAN;
+                break;
+            }
+
+            /* Stisk tlačítka → editace setpointu */
             if (encoder_button()) {
                 wait_button_release();
-                editing = 1;
-                encoder_set(setpoint);
+                mode = MODE_SETPOINT;
                 display_setpoint(setpoint);
             }
 
             _delay_ms(250);
-        } else {
-            /* --- Editační režim: nastav žádanou hodnotu --- */
-            int16_t val = encoder_get();
+            break;
+        }
 
-            /* Omezit rozsah 0.0 - 99.9 °C */
-            if (val < 0) {
-                val = 0;
-                encoder_set(0);
-            } else if (val > 999) {
-                val = 999;
-                encoder_set(999);
+        /* --- Zobrazení fan rychlosti --- */
+        case MODE_FAN:
+        {
+            if (delta) {
+                fan_step += delta;
+                if (fan_step < 0)  fan_step = 0;
+                if (fan_step > 10) fan_step = 10;
+                pwm_set(fan_step);
+                display_fan(fan_step * 10);
+                fan_timeout = 40;  /* reset timeoutu */
             }
 
-            display_setpoint(val);
-
-            /* Stisk tlačítka → ulož a vrať se */
+            /* Tlačítko → editace setpointu */
             if (encoder_button()) {
-                setpoint = val;
                 wait_button_release();
-                editing = 0;
+                mode = MODE_SETPOINT;
+                display_setpoint(setpoint);
+                break;
+            }
+
+            /* Timeout → zpět na teplotu */
+            if (--fan_timeout == 0) {
+                mode = MODE_TEMP;
                 ds18b20_start();
+                _delay_ms(750);
             }
 
             _delay_ms(50);
+            break;
+        }
+
+        /* --- Editace žádané hodnoty --- */
+        case MODE_SETPOINT:
+        {
+            setpoint += delta;
+            if (setpoint < 0)   setpoint = 0;
+            if (setpoint > 999) setpoint = 999;
+
+            display_setpoint(setpoint);
+
+            /* Stisk tlačítka → ulož a vrať se */
+            if (encoder_button()) {
+                wait_button_release();
+                mode = MODE_TEMP;
+                ds18b20_start();
+                _delay_ms(750);
+            }
+
+            _delay_ms(50);
+            break;
+        }
         }
     }
 

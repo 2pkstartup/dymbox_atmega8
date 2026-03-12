@@ -402,15 +402,17 @@ static void wait_button_release(void)
 
 /* ====== PWM ventilátor (Timer1, OC1A = PB1) ====== */
 
+/* Invertovaná tabulka: 0%=0(LOW), 10%=25, ... 100%=255(HIGH) */
 static const uint8_t pwm_table[] = {
     0, 25, 51, 76, 102, 128, 153, 179, 204, 230, 255
 };
 
 static void pwm_init(void)
 {
-    /* Timer1: Fast PWM 8-bit, inverting na OC1A (PB1) → HIGH = aktivní */
+    /* Timer1: Fast PWM 8-bit, non-inverting na OC1A (PB1) */
+    /* HIGH když counter < OCR1A, LOW když counter >= OCR1A */
     /* 16 MHz / 1 / 256 = 62.5 kHz */
-    TCCR1A = (1 << COM1A1) | (1 << COM1A0) | (1 << WGM10);
+    TCCR1A = (1 << COM1A1) | (1 << WGM10);
     TCCR1B = (1 << WGM12) | (1 << CS10);
     OCR1A  = pwm_table[5];  /* 50% výchozí */
 }

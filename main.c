@@ -19,6 +19,13 @@
  *   PD4 = DT  (B)
  *   PD5 = SW  (tlačítko)
  *
+ * DS18B20 teploměr (1-Wire):
+ *   PC5 = DQ (data)
+ *
+ * PWM výstupy (rezervováno, Timer1):
+ *   PB1 = OC1A (PWM1)
+ *   PB2 = OC1B (PWM2)
+ *
  * Všechny výstupy: HIGH = neaktivní (pull-up), LOW = aktivní
  */
 
@@ -39,6 +46,16 @@
 #define ENC_DT      PD4
 #define ENC_SW      PD5
 #define ENC_MASK    ((1 << ENC_CLK)|(1 << ENC_DT)|(1 << ENC_SW))
+
+/* DS18B20 1-Wire na PC5 */
+#define OW_DDR      DDRC
+#define OW_PORT     PORTC
+#define OW_PIN      PINC
+#define OW_BIT      PC5
+
+/* PWM výstupy (rezervováno) */
+#define PWM1_PIN    PB1   /* OC1A */
+#define PWM2_PIN    PB2   /* OC1B */
 
 /* Pin pro každou pozici: DIG1(stovky)=PD2, DIG2(desítky)=PD1, DIG3(jednotky)=PD0 */
 static const uint8_t dig_pin[] = {PD2, PD1, PD0};
@@ -159,11 +176,11 @@ ISR(TIMER0_OVF_vect)
 
 static void display_init(void)
 {
-    /* PORTB: PB0 výstup (seg A), ostatní vstup s pull-up */
-    DDRB  = SEG_B_MASK;
+    /* PORTB: PB0 výstup (seg A), PB1/PB2 výstup (PWM, zatím HIGH), ostatní pull-up */
+    DDRB  = SEG_B_MASK | (1 << PWM1_PIN) | (1 << PWM2_PIN);
     PORTB = 0xFF;
 
-    /* PORTC: PC0-PC4 výstup (seg G,C,D,DP,E), PC5 vstup s pull-up */
+    /* PORTC: PC0-PC4 výstup (segmenty), PC5 vstup s pull-up (1-Wire idle) */
     DDRC  = SEG_C_MASK;
     PORTC = 0x3F;
 
@@ -239,34 +256,130 @@ uint8_t encoder_button(void)
     return enc_button;
 }
 
+/* ====== 1-Wire protokol (DS18B20) ====== */
+
+static uint8_t ow_reset(void)
+{
+    uint8_t presence;
+    cli();
+    OW_DDR |= (1 << OW_BIT);    /* LOW */
+    OW_PORT &= ~(1 << OW_BIT);
+    _delay_us(480);
+    OW_DDR &= ~(1 << OW_BIT);   /* uvolnit (pull-up externí) */
+    OW_PORT &= ~(1 << OW_BIT);  /* bez interního pull-up */
+    _delay_us(70);
+    presence = !(OW_PIN & (1 << OW_BIT));
+    sei();
+    _delay_us(410);
+    return presence;
+}
+
+static void ow_write_bit(uint8_t bit)
+{
+    cli();
+    OW_DDR |= (1 << OW_BIT);
+    OW_PORT &= ~(1 << OW_BIT);
+    if (bit) {
+        _delay_us(6);
+        OW_DDR &= ~(1 << OW_BIT);
+        sei();
+        _delay_us(64);
+    } else {
+        _delay_us(60);
+        OW_DDR &= ~(1 << OW_BIT);
+        sei();
+        _delay_us(10);
+    }
+}
+
+static uint8_t ow_read_bit(void)
+{
+    uint8_t bit;
+    cli();
+    OW_DDR |= (1 << OW_BIT);
+    OW_PORT &= ~(1 << OW_BIT);
+    _delay_us(6);
+    OW_DDR &= ~(1 << OW_BIT);
+    _delay_us(9);
+    bit = !!(OW_PIN & (1 << OW_BIT));
+    sei();
+    _delay_us(55);
+    return bit;
+}
+
+static void ow_write_byte(uint8_t data)
+{
+    for (uint8_t i = 0; i < 8; i++) {
+        ow_write_bit(data & 0x01);
+        data >>= 1;
+    }
+}
+
+static uint8_t ow_read_byte(void)
+{
+    uint8_t data = 0;
+    for (uint8_t i = 0; i < 8; i++)
+        data |= (ow_read_bit() << i);
+    return data;
+}
+
+/* Spustit konverzi teploty (trvá až 750 ms) */
+void ds18b20_start(void)
+{
+    ow_reset();
+    ow_write_byte(0xCC);  /* Skip ROM */
+    ow_write_byte(0x44);  /* Convert T */
+}
+
+/* Přečíst teplotu v 1/10 °C (např. 235 = 23.5°C). Vrátí -999 při chybě. */
+int16_t ds18b20_read_temp(void)
+{
+    if (!ow_reset())
+        return -999;
+
+    ow_write_byte(0xCC);  /* Skip ROM */
+    ow_write_byte(0xBE);  /* Read Scratchpad */
+
+    uint8_t lsb = ow_read_byte();
+    uint8_t msb = ow_read_byte();
+
+    int16_t raw = (int16_t)((msb << 8) | lsb);
+    /* raw je v 1/16 °C, převod na 1/10 °C: raw * 10 / 16 */
+    return (raw * 10 + 8) / 16;
+}
+
+/* Zobrazit teplotu na displeji: XX.X (s tečkou za druhým digitem) */
+static void display_temp(int16_t temp_x10)
+{
+    if (temp_x10 < 0 || temp_x10 > 999)
+        temp_x10 = 0;
+
+    uint8_t d2 = temp_x10 % 10; temp_x10 /= 10;
+    uint8_t d1 = temp_x10 % 10; temp_x10 /= 10;
+    uint8_t d0 = temp_x10 % 10;
+
+    disp_b[0] = seg_b[d0]; disp_c[0] = seg_c[d0]; disp_d[0] = seg_d[d0];
+    /* DIG2 s desetinnou tečkou */
+    disp_b[1] = seg_b[d1]; disp_c[1] = seg_c[d1] | (1 << PC2); disp_d[1] = seg_d[d1];
+    disp_b[2] = seg_b[d2]; disp_c[2] = seg_c[d2]; disp_d[2] = seg_d[d2];
+}
+
 int main(void)
 {
     display_init();
     sei();
 
-    int16_t value = 0;
-    encoder_set(0);
+    ds18b20_start();
+    _delay_ms(750);
 
     while (1) {
-        value = encoder_get();
+        int16_t temp = ds18b20_read_temp();
+        ds18b20_start();  /* spustit další konverzi */
 
-        /* Omezit rozsah 0-999 */
-        if (value < 0) {
-            value = 0;
-            encoder_set(0);
-        } else if (value > 999) {
-            value = 999;
-            encoder_set(999);
-        }
+        display_temp(temp);
 
-        display_number(value);
-
-        /* Tlačítko = reset na 0 */
-        if (encoder_button()) {
-            encoder_set(0);
-            while (encoder_button())
-                ;  /* počkat na uvolnění */
-        }
+        /* Čekání ~1 s (konverze trvá 750 ms, zbytek doplňuje) */
+        _delay_ms(1000);
     }
 
     return 0;

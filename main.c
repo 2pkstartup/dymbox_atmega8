@@ -12,7 +12,7 @@
  *   - Měření teploty DS18B20 (1-Wire), rozlišení 0.1 °C
  *   - 3-místný 7-seg display (common anode), multiplexovaný Timer0 ISR
  *   - Rotační enkodér KY-040 (polling v Timer0 ISR, debounce tlačítka)
- *   - PWM ventilátor 0-100% po 10% (Timer1, 62.5 kHz, active HIGH)
+ *   - PWM ventilátor 0-100% po 10% (Timer1, ~977 Hz, active HIGH)
  *   - Topná spirála ON/OFF s hysterezí 5 °C (active HIGH)
  *   - Setpoint ukládán do EEPROM (s magic byte validací)
  *
@@ -459,9 +459,9 @@ static void pwm_init(void)
 {
     /* Timer1: Fast PWM 8-bit, non-inverting na OC1A (PB1) */
     /* HIGH když counter < OCR1A, LOW když counter >= OCR1A */
-    /* 16 MHz / 1 / 256 = 62.5 kHz */
+    /* 16 MHz / 64 / 256 = ~977 Hz (D4184 nezvládá vysoké frekvence) */
     TCCR1A = (1 << COM1A1) | (1 << WGM10);
-    TCCR1B = (1 << WGM12) | (1 << CS10);
+    TCCR1B = (1 << WGM12) | (1 << CS11) | (1 << CS10);
     OCR1A  = pwm_table[5];  /* 50% výchozí */
 }
 
